@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+main.js
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local environment
+.env
+.env.local
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Internal-only project files
+docs/internal/
+benchmarks/
+local_tests/
+
