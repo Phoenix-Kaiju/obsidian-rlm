@@ -1,0 +1,10 @@
+{
+  "id": "rlm",
+  "name": "RLM",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Ask questions against your vault using LM Studio and Obsidian-native tools.",
+  "author": "Phoenix-Kaiju",
+  "isDesktopOnly": true
+}
+
