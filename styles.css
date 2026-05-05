@@ -59,7 +59,7 @@
 
 .rlm-question-input {
   flex: 1;
-  min-height: 72px;
+  min-height: 56px;
   padding: 0;
   border: 0;
   overflow-y: auto;
@@ -76,15 +76,18 @@
 
 .rlm-question-footer {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
   margin-top: auto;
+  min-height: 32px;
 }
 
 .rlm-question-hint {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  line-height: 1.2;
+  padding-bottom: 2px;
 }
 
 .rlm-resize-handle {
