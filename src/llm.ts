@@ -48,6 +48,7 @@ interface RlmToolLoopParams {
 
 export class RlmToolLoop {
   private readonly toolExecutor: RlmToolExecutor;
+  private activeDeadline?: number;
 
   constructor(
     private readonly settings: RlmSettings,
@@ -63,75 +64,80 @@ export class RlmToolLoop {
       throw new Error(`Maximum tool depth (${params.settings.maxToolDepth}) exceeded.`);
     }
     const deadline = Date.now() + params.settings.maxElapsedSeconds * 1000;
+    this.activeDeadline = deadline;
 
     if (!params.settings.model.trim()) {
       throw new Error("Set an LM Studio model in RLM settings before asking a question.");
     }
 
-    const messages: ChatMessage[] = [
-      {
-        role: "system",
-        content: this.buildSystemPrompt(params.settings.maxToolCalls, params.settings.maxToolDepth),
-      },
-      {
-        role: "user",
-        content: this.buildUserPrompt(params.question, params.scope, params.context),
-      },
-    ];
+    try {
+      const messages: ChatMessage[] = [
+        {
+          role: "system",
+          content: this.buildSystemPrompt(params.settings.maxToolCalls, params.settings.maxToolDepth),
+        },
+        {
+          role: "user",
+          content: this.buildUserPrompt(params.question, params.scope, params.context),
+        },
+      ];
 
-    const sources = new Set<string>(params.context.records.map((record: { path: string }) => record.path));
-    let toolCallsUsed = 0;
+      const sources = new Set<string>(params.context.records.map((record: { path: string }) => record.path));
+      let toolCallsUsed = 0;
 
-    for (let iteration = 0; iteration < params.settings.maxToolCalls; iteration += 1) {
-      this.throwIfCancelled();
-      this.throwIfExpired(deadline);
-      const assistantMessage = await this.createChatCompletion(messages, true);
-      this.throwIfCancelled();
-      this.throwIfExpired(deadline);
-      const validatedToolCalls = this.validateToolCalls(assistantMessage.tool_calls);
-
-      if (validatedToolCalls.length === 0) {
-        const answer = assistantMessage.content?.trim();
-        if (!answer) {
-          throw new Error("LM Studio returned neither tool calls nor a final answer.");
-        }
-
-        return {
-          answer,
-          sources: Array.from(sources),
-          toolCallsUsed,
-          depth,
-        };
-      }
-
-      if (toolCallsUsed + validatedToolCalls.length > params.settings.maxToolCalls) {
-        throw new Error(`Maximum tool calls (${params.settings.maxToolCalls}) exceeded.`);
-      }
-
-      messages.push({
-        role: "assistant",
-        content: assistantMessage.content ?? null,
-        tool_calls: validatedToolCalls,
-      });
-
-      for (const toolCall of validatedToolCalls) {
+      for (let iteration = 0; iteration < params.settings.maxToolCalls; iteration += 1) {
         this.throwIfCancelled();
         this.throwIfExpired(deadline);
-        const result = await this.toolExecutor.execute(toolCall, depth, params.settings.maxToolDepth);
-        toolCallsUsed += 1;
-        for (const source of result.sources) {
-          sources.add(source);
+        const assistantMessage = await this.createChatCompletion(messages, true, deadline);
+        this.throwIfCancelled();
+        this.throwIfExpired(deadline);
+        const validatedToolCalls = this.validateToolCalls(assistantMessage.tool_calls);
+
+        if (validatedToolCalls.length === 0) {
+          const answer = assistantMessage.content?.trim();
+          if (!answer) {
+            throw new Error("LM Studio returned neither tool calls nor a final answer.");
+          }
+
+          return {
+            answer,
+            sources: Array.from(sources),
+            toolCallsUsed,
+            depth,
+          };
+        }
+
+        if (toolCallsUsed + validatedToolCalls.length > params.settings.maxToolCalls) {
+          throw new Error(`Maximum tool calls (${params.settings.maxToolCalls}) exceeded.`);
         }
 
         messages.push({
-          role: "tool",
-          tool_call_id: toolCall.id,
-          content: JSON.stringify(result.output),
+          role: "assistant",
+          content: assistantMessage.content ?? null,
+          tool_calls: validatedToolCalls,
         });
-      }
-    }
 
-    throw new Error(`Maximum tool calls (${params.settings.maxToolCalls}) exceeded.`);
+        for (const toolCall of validatedToolCalls) {
+          this.throwIfCancelled();
+          this.throwIfExpired(deadline);
+          const result = await this.toolExecutor.execute(toolCall, depth, params.settings.maxToolDepth);
+          toolCallsUsed += 1;
+          for (const source of result.sources) {
+            sources.add(source);
+          }
+
+          messages.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(result.output),
+          });
+        }
+      }
+
+      throw new Error(`Maximum tool calls (${params.settings.maxToolCalls}) exceeded.`);
+    } finally {
+      this.activeDeadline = undefined;
+    }
   }
 
   private async summarizeText(text: string, instruction: string, depth: number) {
@@ -156,15 +162,15 @@ export class RlmToolLoop {
           text,
         ].join("\n"),
       },
-    ], false);
+    ], false, this.requireActiveDeadline());
 
     return response.content?.trim() ?? "";
   }
 
-  private async createChatCompletion(messages: ChatMessage[], includeTools: boolean) {
+  private async createChatCompletion(messages: ChatMessage[], includeTools: boolean, deadline: number) {
     const headers: Record<string, string> = {};
     const apiKey = this.settings.apiKey.trim();
-    const timeoutMs = Math.max(1, this.settings.maxElapsedSeconds) * 1000;
+    const timeoutMs = this.getRemainingTimeoutMs(deadline);
 
     if (apiKey) {
       headers.Authorization = `Bearer ${apiKey}`;
@@ -190,7 +196,7 @@ export class RlmToolLoop {
       }),
       new Promise<never>((_, reject) => {
         window.setTimeout(() => {
-          reject(new Error(`LM Studio request timed out after ${this.settings.maxElapsedSeconds}s.`));
+          reject(new Error(`LM Studio request timed out after ${Math.ceil(timeoutMs / 1000)}s.`));
         }, timeoutMs);
       }),
     ]);
@@ -294,5 +300,22 @@ export class RlmToolLoop {
     if (Date.now() > deadline) {
       throw new Error(`Maximum elapsed time (${this.settings.maxElapsedSeconds}s) exceeded.`);
     }
+  }
+
+  private requireActiveDeadline() {
+    if (!this.activeDeadline) {
+      throw new Error("No active request deadline is available.");
+    }
+
+    return this.activeDeadline;
+  }
+
+  private getRemainingTimeoutMs(deadline: number) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(`Maximum elapsed time (${this.settings.maxElapsedSeconds}s) exceeded.`);
+    }
+
+    return remainingMs;
   }
 }
