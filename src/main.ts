@@ -443,17 +443,19 @@ export default class RlmPlugin extends Plugin {
 }
 
 class RlmQuestionModal extends Modal {
-  private static readonly MIN_WIDTH = 520;
+  private static readonly MIN_WIDTH = 320;
   private static readonly DEFAULT_WIDTH = 720;
   private static readonly MIN_HEIGHT = 180;
   private static readonly DEFAULT_HEIGHT = 220;
   private static readonly MAX_HEIGHT = 420;
   private static readonly DEFAULT_TOP = 68;
+  private static readonly VIEWPORT_MARGIN = 24;
   private question = "";
   private folderPath = "";
   private composerInput?: HTMLTextAreaElement;
   private resizeCleanup?: () => void;
   private dragCleanup?: () => void;
+  private manualHeight?: number;
 
   constructor(
     app: App,
@@ -470,11 +472,14 @@ class RlmQuestionModal extends Modal {
     containerEl.addClass("rlm-question-modal-container");
     contentEl.addClass("rlm-question-modal");
     modalEl.addClass("rlm-question-modal-shell");
-    modalEl.style.width = `${RlmQuestionModal.DEFAULT_WIDTH}px`;
-    modalEl.style.minWidth = `${RlmQuestionModal.MIN_WIDTH}px`;
-    modalEl.style.height = `${RlmQuestionModal.DEFAULT_HEIGHT}px`;
-    modalEl.style.minHeight = `${RlmQuestionModal.MIN_HEIGHT}px`;
-    modalEl.style.maxHeight = `${RlmQuestionModal.MAX_HEIGHT}px`;
+    const { minWidth, maxWidth } = this.getWidthBounds();
+    const { minHeight, maxHeight } = this.getHeightBounds();
+    modalEl.style.width = `${Math.min(RlmQuestionModal.DEFAULT_WIDTH, maxWidth)}px`;
+    modalEl.style.minWidth = `${minWidth}px`;
+    modalEl.style.maxWidth = `${maxWidth}px`;
+    modalEl.style.height = `${Math.min(RlmQuestionModal.DEFAULT_HEIGHT, maxHeight)}px`;
+    modalEl.style.minHeight = `${minHeight}px`;
+    modalEl.style.maxHeight = `${maxHeight}px`;
     modalEl.style.left = "50%";
     modalEl.style.top = `${RlmQuestionModal.DEFAULT_TOP}%`;
 
@@ -542,6 +547,7 @@ class RlmQuestionModal extends Modal {
     this.resizeCleanup = undefined;
     this.dragCleanup = undefined;
     this.composerInput = undefined;
+    this.manualHeight = undefined;
     this.containerEl.removeClass("rlm-question-modal-container");
     this.contentEl.removeClass("rlm-question-modal");
     this.modalEl.removeClass("rlm-question-modal-shell");
@@ -558,10 +564,14 @@ class RlmQuestionModal extends Modal {
     const nextHeight = Math.min(Math.max(textArea.scrollHeight, 72), 220);
     textArea.style.height = `${nextHeight}px`;
 
-    const modalHeight = Math.min(
-      Math.max(nextHeight + 128, RlmQuestionModal.DEFAULT_HEIGHT),
-      RlmQuestionModal.MAX_HEIGHT,
+    const { minHeight, maxHeight } = this.getHeightBounds();
+    const autoHeight = Math.min(
+      Math.max(nextHeight + 128, Math.min(RlmQuestionModal.DEFAULT_HEIGHT, maxHeight)),
+      maxHeight,
     );
+    const modalHeight = this.manualHeight
+      ? this.clamp(Math.max(this.manualHeight, autoHeight), minHeight, maxHeight)
+      : autoHeight;
     this.modalEl.style.height = `${modalHeight}px`;
   }
 
@@ -656,8 +666,8 @@ class RlmQuestionModal extends Modal {
     const startHeight = rect.height;
     const startLeft = rect.left + rect.width / 2;
     const startTop = rect.top + rect.height / 2;
-    const maxWidth = Math.max(window.innerWidth - 48, RlmQuestionModal.MIN_WIDTH);
-    const maxHeight = Math.min(window.innerHeight - 64, RlmQuestionModal.MAX_HEIGHT);
+    const { minWidth, maxWidth } = this.getWidthBounds();
+    const { minHeight, maxHeight } = this.getHeightBounds();
 
     const onPointerMove = (moveEvent: PointerEvent) => {
       const dx = moveEvent.clientX - startX;
@@ -668,17 +678,17 @@ class RlmQuestionModal extends Modal {
       let top = startTop;
 
       if (direction.includes("e")) {
-        width = this.clamp(startWidth + dx, RlmQuestionModal.MIN_WIDTH, maxWidth);
+        width = this.clamp(startWidth + dx, minWidth, maxWidth);
       }
       if (direction.includes("w")) {
-        width = this.clamp(startWidth - dx, RlmQuestionModal.MIN_WIDTH, maxWidth);
+        width = this.clamp(startWidth - dx, minWidth, maxWidth);
         left = startLeft + (startWidth - width) / 2 + dx / 2;
       }
       if (direction.includes("s")) {
-        height = this.clamp(startHeight + dy, RlmQuestionModal.MIN_HEIGHT, maxHeight);
+        height = this.clamp(startHeight + dy, minHeight, maxHeight);
       }
       if (direction.includes("n")) {
-        height = this.clamp(startHeight - dy, RlmQuestionModal.MIN_HEIGHT, maxHeight);
+        height = this.clamp(startHeight - dy, minHeight, maxHeight);
         top = startTop + (startHeight - height) / 2 + dy / 2;
       }
 
@@ -689,6 +699,10 @@ class RlmQuestionModal extends Modal {
       this.modalEl.style.height = `${height}px`;
       this.modalEl.style.left = `${left}px`;
       this.modalEl.style.top = `${top}px`;
+
+      if (direction.includes("n") || direction.includes("s")) {
+        this.manualHeight = height;
+      }
     };
 
     const onPointerUp = () => {
@@ -702,6 +716,28 @@ class RlmQuestionModal extends Modal {
 
   private clamp(value: number, min: number, max: number) {
     return Math.min(Math.max(value, min), max);
+  }
+
+  private getWidthBounds() {
+    const maxWidth = Math.max(
+      window.innerWidth - RlmQuestionModal.VIEWPORT_MARGIN * 2,
+      260,
+    );
+    return {
+      minWidth: Math.min(RlmQuestionModal.MIN_WIDTH, maxWidth),
+      maxWidth,
+    };
+  }
+
+  private getHeightBounds() {
+    const maxHeight = Math.max(
+      Math.min(window.innerHeight - 64, RlmQuestionModal.MAX_HEIGHT),
+      160,
+    );
+    return {
+      minHeight: Math.min(RlmQuestionModal.MIN_HEIGHT, maxHeight),
+      maxHeight,
+    };
   }
 }
 
