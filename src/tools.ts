@@ -178,10 +178,20 @@ export class RlmToolExecutor {
   }
 
   private async readNote(path: string): Promise<RlmToolExecutionResult> {
+    if (this.remainingTotalCharacters <= 0) {
+      throw new Error(`Cannot read '${path}' because the max total characters limit was reached.`);
+    }
+
     const result = await this.createContextReaders().readCurrentNote(path);
     this.consumeCharacterBudget(result.totalCharacters);
+
+    if (result.records.length === 0) {
+      const detail = result.skipped[0] ?? `Note not found: ${path}`;
+      throw new Error(detail);
+    }
+
     return {
-      output: result.records[0] ?? { path, error: "Note not found." },
+      output: result.records[0],
       sources: result.records.map((record) => record.path),
     };
   }
