@@ -164,27 +164,36 @@ export class RlmToolLoop {
   private async createChatCompletion(messages: ChatMessage[], includeTools: boolean) {
     const headers: Record<string, string> = {};
     const apiKey = this.settings.apiKey.trim();
+    const timeoutMs = Math.max(1, this.settings.maxElapsedSeconds) * 1000;
 
     if (apiKey) {
       headers.Authorization = `Bearer ${apiKey}`;
     }
 
-    const response = await requestUrl({
-      url: `${this.settings.baseUrl.replace(/\/+$/, "")}/chat/completions`,
-      method: "POST",
-      contentType: "application/json",
-      headers,
-      body: JSON.stringify({
-        model: this.settings.model,
-        messages,
-        ...(includeTools
-          ? {
-            tools: this.toolExecutor.getDefinitions(),
-            tool_choice: "auto",
-          }
-          : {}),
+    const response = await Promise.race([
+      requestUrl({
+        url: `${this.settings.baseUrl.replace(/\/+$/, "")}/chat/completions`,
+        method: "POST",
+        contentType: "application/json",
+        headers,
+        throw: false,
+        body: JSON.stringify({
+          model: this.settings.model,
+          messages,
+          ...(includeTools
+            ? {
+              tools: this.toolExecutor.getDefinitions(),
+              tool_choice: "auto",
+            }
+            : {}),
+        }),
       }),
-    });
+      new Promise<never>((_, reject) => {
+        window.setTimeout(() => {
+          reject(new Error(`LM Studio request timed out after ${this.settings.maxElapsedSeconds}s.`));
+        }, timeoutMs);
+      }),
+    ]);
 
     if (response.status >= 400) {
       const payload = response.json as OpenAiChatCompletionResponse;
