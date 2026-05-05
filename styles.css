@@ -12,6 +12,11 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  cursor: grab;
+}
+
+.rlm-question-modal-shell:active {
+  cursor: grabbing;
 }
 
 .rlm-question-modal {
@@ -58,6 +63,7 @@
   overflow-y: auto;
   resize: none;
   box-shadow: none;
+  cursor: text;
 }
 
 .rlm-question-input:focus,

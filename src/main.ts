@@ -453,6 +453,7 @@ class RlmQuestionModal extends Modal {
   private folderPath = "";
   private composerInput?: HTMLTextAreaElement;
   private resizeCleanup?: () => void;
+  private dragCleanup?: () => void;
 
   constructor(
     app: App,
@@ -527,6 +528,7 @@ class RlmQuestionModal extends Modal {
     };
 
     askButton.addEventListener("click", submit);
+    this.installDragging();
     this.installResizeHandles();
     window.setTimeout(() => {
       this.syncComposerHeight();
@@ -536,7 +538,9 @@ class RlmQuestionModal extends Modal {
 
   onClose() {
     this.resizeCleanup?.();
+    this.dragCleanup?.();
     this.resizeCleanup = undefined;
+    this.dragCleanup = undefined;
     this.composerInput = undefined;
     this.containerEl.removeClass("rlm-question-modal-container");
     this.contentEl.removeClass("rlm-question-modal");
@@ -581,6 +585,64 @@ class RlmQuestionModal extends Modal {
         dispose();
       }
     };
+  }
+
+  private installDragging() {
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+
+      if (target.closest(".rlm-resize-handle")) {
+        return;
+      }
+
+      if (target.closest("button, textarea, input, a")) {
+        return;
+      }
+
+      this.startDrag(event);
+    };
+
+    this.modalEl.addEventListener("pointerdown", onPointerDown);
+    this.dragCleanup = () => {
+      this.modalEl.removeEventListener("pointerdown", onPointerDown);
+    };
+  }
+
+  private startDrag(event: PointerEvent) {
+    event.preventDefault();
+
+    const rect = this.modalEl.getBoundingClientRect();
+    const offsetX = event.clientX - rect.left;
+    const offsetY = event.clientY - rect.top;
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const width = rect.width;
+      const height = rect.height;
+      const nextLeft = this.clamp(
+        moveEvent.clientX - offsetX + width / 2,
+        width / 2 + 16,
+        window.innerWidth - width / 2 - 16,
+      );
+      const nextTop = this.clamp(
+        moveEvent.clientY - offsetY + height / 2,
+        height / 2 + 16,
+        window.innerHeight - height / 2 - 16,
+      );
+
+      this.modalEl.style.left = `${nextLeft}px`;
+      this.modalEl.style.top = `${nextTop}px`;
+    };
+
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
   }
 
   private startResize(direction: "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw", event: PointerEvent) {
