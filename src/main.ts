@@ -286,7 +286,7 @@ export default class RlmPlugin extends Plugin {
       throw new Error("Open a Markdown note before inserting an RLM answer.");
     }
 
-    const prefix = editor.getValue().endsWith("\n") ? "\n" : "\n\n";
+    const prefix = this.getInsertPrefix(editor);
     editor.replaceSelection(`${prefix}${this.formatAnswerInsert(result)}\n`);
     new Notice("RLM answer inserted into the active note.");
   }
@@ -478,6 +478,25 @@ export default class RlmPlugin extends Plugin {
     }
 
     return null;
+  }
+
+  private getInsertPrefix(editor: MarkdownView["editor"]) {
+    const from = editor.getCursor("from");
+    const beforeSelection = editor.getRange({ line: 0, ch: 0 }, from);
+
+    if (beforeSelection.length === 0) {
+      return "";
+    }
+
+    if (beforeSelection.endsWith("\n\n")) {
+      return "";
+    }
+
+    if (beforeSelection.endsWith("\n")) {
+      return "\n";
+    }
+
+    return "\n\n";
   }
 
   private formatAnswerExport(result: RlmResult) {
