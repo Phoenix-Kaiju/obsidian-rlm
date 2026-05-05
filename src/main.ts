@@ -6,9 +6,9 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
-  TFile,
   WorkspaceLeaf,
 } from "obsidian";
+import { VaultContextReaders, VaultContextResult } from "./context";
 
 const VIEW_TYPE_RLM_RESULTS = "rlm-results";
 const DEFAULT_SETTINGS: RlmSettings = {
@@ -20,7 +20,9 @@ const DEFAULT_SETTINGS: RlmSettings = {
   maxNotesRead: 10,
   maxSearchResults: 20,
   maxFolderNotesListed: 100,
+  maxNoteCharacters: 12000,
   maxElapsedSeconds: 60,
+  ignoredFolders: ".obsidian,RLM Answers",
 };
 
 type RlmScope = "current-note" | "selection" | "folder" | "vault";
@@ -34,7 +36,9 @@ interface RlmSettings {
   maxNotesRead: number;
   maxSearchResults: number;
   maxFolderNotesListed: number;
+  maxNoteCharacters: number;
   maxElapsedSeconds: number;
+  ignoredFolders: string;
 }
 
 interface RlmRequest {
@@ -148,16 +152,19 @@ export default class RlmPlugin extends Plugin {
 
     await this.activateResultView();
 
+    const context = await this.collectContext(request);
+
     const result: RlmResult = {
       question: request.question,
       scope: request.scope,
       answer: [
-        "RLM command scaffold is ready.",
+        "Vault context readers are ready.",
+        "",
+        this.formatContextSummary(context),
         "",
         "The next implementation slice is the LM Studio tool-calling loop.",
-        "This placeholder confirms the command, modal, result panel, and answer-note flow are wired.",
       ].join("\n"),
-      sources: this.initialSources(request),
+      sources: context.records.map((record) => record.path),
       budgetStatus: this.formatBudgetStatus(),
     };
 
@@ -210,18 +217,65 @@ export default class RlmPlugin extends Plugin {
     }
   }
 
-  private initialSources(request: RlmRequest) {
-    const sources = new Set<string>();
+  private async collectContext(request: RlmRequest): Promise<VaultContextResult> {
+    const readers = new VaultContextReaders(this.app, {
+      maxNotesRead: this.settings.maxNotesRead,
+      maxFolderNotesListed: this.settings.maxFolderNotesListed,
+      maxNoteCharacters: this.settings.maxNoteCharacters,
+      ignoredFolders: this.parseIgnoredFolders(),
+    });
 
-    if (request.notePath) {
-      sources.add(request.notePath);
+    if (request.scope === "current-note" && request.notePath) {
+      return readers.readCurrentNote(request.notePath);
     }
 
-    if (request.folderPath) {
-      sources.add(request.folderPath);
+    if (request.scope === "selection") {
+      return readers.readSelection(request.notePath, request.selectedText ?? "");
     }
 
-    return Array.from(sources);
+    if (request.scope === "folder" && request.folderPath) {
+      return readers.readFolder(request.folderPath);
+    }
+
+    if (request.scope === "vault") {
+      return readers.readVault();
+    }
+
+    return {
+      records: [],
+      skipped: [`No context reader matched scope: ${request.scope}`],
+      limitHit: false,
+    };
+  }
+
+  private formatContextSummary(context: VaultContextResult) {
+    const lines = [
+      `Collected ${context.records.length} context record${context.records.length === 1 ? "" : "s"}.`,
+    ];
+
+    if (context.records.length > 0) {
+      lines.push("");
+      lines.push("Records:");
+      for (const record of context.records) {
+        const truncation = record.truncated ? ", truncated" : "";
+        lines.push(`- ${record.path} (${record.content.length} chars${truncation})`);
+      }
+    }
+
+    if (context.skipped.length > 0) {
+      lines.push("");
+      lines.push("Skipped:");
+      for (const skipped of context.skipped.slice(0, 10)) {
+        lines.push(`- ${skipped}`);
+      }
+    }
+
+    if (context.limitHit) {
+      lines.push("");
+      lines.push("One or more context limits were reached.");
+    }
+
+    return lines.join("\n");
   }
 
   private formatBudgetStatus() {
@@ -229,8 +283,16 @@ export default class RlmPlugin extends Plugin {
       `max tool calls: ${this.settings.maxToolCalls}`,
       `max notes read: ${this.settings.maxNotesRead}`,
       `max search results: ${this.settings.maxSearchResults}`,
+      `max note chars: ${this.settings.maxNoteCharacters}`,
       `max elapsed: ${this.settings.maxElapsedSeconds}s`,
     ].join(", ");
+  }
+
+  private parseIgnoredFolders() {
+    return this.settings.ignoredFolders
+      .split(",")
+      .map((folder) => folder.trim())
+      .filter((folder) => folder.length > 0);
   }
 
   private async ensureFolder(folderPath: string) {
@@ -464,7 +526,18 @@ class RlmSettingTab extends PluginSettingTab {
     this.addNumberSetting("Max notes read", "maxNotesRead");
     this.addNumberSetting("Max search results", "maxSearchResults");
     this.addNumberSetting("Max folder notes listed", "maxFolderNotesListed");
+    this.addNumberSetting("Max note characters", "maxNoteCharacters");
     this.addNumberSetting("Max elapsed seconds", "maxElapsedSeconds");
+
+    new Setting(containerEl)
+      .setName("Ignored folders")
+      .setDesc("Comma-separated vault-relative folder paths.")
+      .addText((text) => text
+        .setValue(this.plugin.settings.ignoredFolders)
+        .onChange(async (value) => {
+          this.plugin.settings.ignoredFolders = value;
+          await this.plugin.saveSettings();
+        }));
   }
 
   private addNumberSetting(name: string, key: keyof Pick<RlmSettings,
@@ -472,6 +545,7 @@ class RlmSettingTab extends PluginSettingTab {
     "maxNotesRead" |
     "maxSearchResults" |
     "maxFolderNotesListed" |
+    "maxNoteCharacters" |
     "maxElapsedSeconds"
   >) {
     new Setting(this.containerEl)
