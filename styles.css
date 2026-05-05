@@ -1,3 +1,64 @@
+.rlm-question-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rlm-folder-row {
+  display: flex;
+}
+
+.rlm-folder-input,
+.rlm-question-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+
+.rlm-folder-input {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+}
+
+.rlm-question-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-primary);
+}
+
+.rlm-question-input {
+  min-height: 132px;
+  padding: 0;
+  border: 0;
+  resize: vertical;
+  box-shadow: none;
+}
+
+.rlm-question-input:focus,
+.rlm-folder-input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.rlm-question-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rlm-question-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
 .rlm-result-view {
   display: flex;
   flex-direction: column;

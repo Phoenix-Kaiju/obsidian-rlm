@@ -458,40 +458,62 @@ class RlmQuestionModal extends Modal {
     const { contentEl, titleEl } = this;
     titleEl.setText("Ask RLM");
     contentEl.empty();
+    contentEl.addClass("rlm-question-modal");
 
     if (this.request.scope === "folder") {
-      new Setting(contentEl)
-        .setName("Folder")
-        .addText((text) => text
-          .setPlaceholder("Folder path")
-          .onChange((value) => {
-            this.folderPath = value;
-          }));
+      const folderRow = contentEl.createDiv({ cls: "rlm-folder-row" });
+      const folderInput = folderRow.createEl("input", {
+        cls: "rlm-folder-input",
+        type: "text",
+      });
+      folderInput.placeholder = "Folder path";
+      folderInput.addEventListener("input", () => {
+        this.folderPath = folderInput.value;
+      });
     }
 
-    new Setting(contentEl)
-      .setName("Question")
-      .addTextArea((text) => {
-        text
-          .setPlaceholder("What do you want to know?")
-          .onChange((value) => {
-            this.question = value;
-          });
-        text.inputEl.rows = 5;
-      });
+    const composer = contentEl.createDiv({ cls: "rlm-question-composer" });
+    const textArea = composer.createEl("textarea", {
+      cls: "rlm-question-input",
+    });
+    textArea.placeholder = "What do you want to know?";
+    textArea.rows = 5;
+    textArea.addEventListener("input", () => {
+      this.question = textArea.value;
+    });
+    textArea.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        submit();
+      }
+    });
 
-    new Setting(contentEl)
-      .addButton((button) => button
-        .setButtonText("Ask")
-        .setCta()
-        .onClick(() => {
-          this.close();
-          this.onSubmit({
-            ...this.request,
-            question: this.question,
-            folderPath: this.request.scope === "folder" ? this.folderPath : undefined,
-          });
-        }));
+    const footer = composer.createDiv({ cls: "rlm-question-footer" });
+    footer.createDiv({
+      cls: "rlm-question-hint",
+      text: "Ctrl+Enter to ask",
+    });
+
+    const askButton = footer.createEl("button", {
+      cls: "mod-cta",
+      text: "Ask",
+    });
+
+    const submit = () => {
+      this.close();
+      this.onSubmit({
+        ...this.request,
+        question: this.question,
+        folderPath: this.request.scope === "folder" ? this.folderPath : undefined,
+      });
+    };
+
+    askButton.addEventListener("click", submit);
+    window.setTimeout(() => textArea.focus(), 0);
+  }
+
+  onClose() {
+    this.contentEl.removeClass("rlm-question-modal");
   }
 }
 
