@@ -443,8 +443,16 @@ export default class RlmPlugin extends Plugin {
 }
 
 class RlmQuestionModal extends Modal {
+  private static readonly MIN_WIDTH = 520;
+  private static readonly DEFAULT_WIDTH = 720;
+  private static readonly MIN_HEIGHT = 180;
+  private static readonly DEFAULT_HEIGHT = 220;
+  private static readonly MAX_HEIGHT = 420;
+  private static readonly DEFAULT_TOP = 68;
   private question = "";
   private folderPath = "";
+  private composerInput?: HTMLTextAreaElement;
+  private resizeCleanup?: () => void;
 
   constructor(
     app: App,
@@ -455,10 +463,19 @@ class RlmQuestionModal extends Modal {
   }
 
   onOpen() {
-    const { contentEl, titleEl } = this;
+    const { containerEl, contentEl, modalEl, titleEl } = this;
     titleEl.setText("Ask RLM");
     contentEl.empty();
+    containerEl.addClass("rlm-question-modal-container");
     contentEl.addClass("rlm-question-modal");
+    modalEl.addClass("rlm-question-modal-shell");
+    modalEl.style.width = `${RlmQuestionModal.DEFAULT_WIDTH}px`;
+    modalEl.style.minWidth = `${RlmQuestionModal.MIN_WIDTH}px`;
+    modalEl.style.height = `${RlmQuestionModal.DEFAULT_HEIGHT}px`;
+    modalEl.style.minHeight = `${RlmQuestionModal.MIN_HEIGHT}px`;
+    modalEl.style.maxHeight = `${RlmQuestionModal.MAX_HEIGHT}px`;
+    modalEl.style.left = "50%";
+    modalEl.style.top = `${RlmQuestionModal.DEFAULT_TOP}%`;
 
     if (this.request.scope === "folder") {
       const folderRow = contentEl.createDiv({ cls: "rlm-folder-row" });
@@ -476,10 +493,11 @@ class RlmQuestionModal extends Modal {
     const textArea = composer.createEl("textarea", {
       cls: "rlm-question-input",
     });
+    this.composerInput = textArea;
     textArea.placeholder = "What do you want to know?";
-    textArea.rows = 5;
     textArea.addEventListener("input", () => {
       this.question = textArea.value;
+      this.syncComposerHeight();
     });
     textArea.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -509,11 +527,119 @@ class RlmQuestionModal extends Modal {
     };
 
     askButton.addEventListener("click", submit);
-    window.setTimeout(() => textArea.focus(), 0);
+    this.installResizeHandles();
+    window.setTimeout(() => {
+      this.syncComposerHeight();
+      textArea.focus();
+    }, 0);
   }
 
   onClose() {
+    this.resizeCleanup?.();
+    this.resizeCleanup = undefined;
+    this.composerInput = undefined;
+    this.containerEl.removeClass("rlm-question-modal-container");
     this.contentEl.removeClass("rlm-question-modal");
+    this.modalEl.removeClass("rlm-question-modal-shell");
+    this.modalEl.removeAttribute("style");
+  }
+
+  private syncComposerHeight() {
+    const textArea = this.composerInput;
+    if (!textArea) {
+      return;
+    }
+
+    textArea.style.height = "0px";
+    const nextHeight = Math.min(Math.max(textArea.scrollHeight, 72), 220);
+    textArea.style.height = `${nextHeight}px`;
+
+    const modalHeight = Math.min(
+      Math.max(nextHeight + 128, RlmQuestionModal.DEFAULT_HEIGHT),
+      RlmQuestionModal.MAX_HEIGHT,
+    );
+    this.modalEl.style.height = `${modalHeight}px`;
+  }
+
+  private installResizeHandles() {
+    const directions = ["n", "s", "e", "w", "ne", "nw", "se", "sw"] as const;
+    const cleanup: Array<() => void> = [];
+
+    for (const direction of directions) {
+      const handle = this.modalEl.createDiv({
+        cls: `rlm-resize-handle rlm-resize-${direction}`,
+      });
+      handle.setAttribute("aria-hidden", "true");
+      const onPointerDown = (event: PointerEvent) => this.startResize(direction, event);
+      handle.addEventListener("pointerdown", onPointerDown);
+      cleanup.push(() => handle.removeEventListener("pointerdown", onPointerDown));
+      cleanup.push(() => handle.remove());
+    }
+
+    this.resizeCleanup = () => {
+      for (const dispose of cleanup.reverse()) {
+        dispose();
+      }
+    };
+  }
+
+  private startResize(direction: "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw", event: PointerEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const rect = this.modalEl.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startWidth = rect.width;
+    const startHeight = rect.height;
+    const startLeft = rect.left + rect.width / 2;
+    const startTop = rect.top + rect.height / 2;
+    const maxWidth = Math.max(window.innerWidth - 48, RlmQuestionModal.MIN_WIDTH);
+    const maxHeight = Math.min(window.innerHeight - 64, RlmQuestionModal.MAX_HEIGHT);
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      let width = startWidth;
+      let height = startHeight;
+      let left = startLeft;
+      let top = startTop;
+
+      if (direction.includes("e")) {
+        width = this.clamp(startWidth + dx, RlmQuestionModal.MIN_WIDTH, maxWidth);
+      }
+      if (direction.includes("w")) {
+        width = this.clamp(startWidth - dx, RlmQuestionModal.MIN_WIDTH, maxWidth);
+        left = startLeft + (startWidth - width) / 2 + dx / 2;
+      }
+      if (direction.includes("s")) {
+        height = this.clamp(startHeight + dy, RlmQuestionModal.MIN_HEIGHT, maxHeight);
+      }
+      if (direction.includes("n")) {
+        height = this.clamp(startHeight - dy, RlmQuestionModal.MIN_HEIGHT, maxHeight);
+        top = startTop + (startHeight - height) / 2 + dy / 2;
+      }
+
+      left = this.clamp(left, width / 2 + 16, window.innerWidth - width / 2 - 16);
+      top = this.clamp(top, height / 2 + 16, window.innerHeight - height / 2 - 16);
+
+      this.modalEl.style.width = `${width}px`;
+      this.modalEl.style.height = `${height}px`;
+      this.modalEl.style.left = `${left}px`;
+      this.modalEl.style.top = `${top}px`;
+    };
+
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+  }
+
+  private clamp(value: number, min: number, max: number) {
+    return Math.min(Math.max(value, min), max);
   }
 }
 
