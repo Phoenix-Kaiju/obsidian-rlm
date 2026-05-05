@@ -194,6 +194,12 @@
   padding-left: 18px;
 }
 
+.rlm-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .rlm-empty-state {
   color: var(--text-muted);
 }

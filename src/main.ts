@@ -1,6 +1,7 @@
 import {
   App,
   ItemView,
+  MarkdownView,
   Modal,
   Notice,
   Plugin,
@@ -268,6 +269,24 @@ export default class RlmPlugin extends Plugin {
     await this.app.workspace.getLeaf(false).openFile(file);
   }
 
+  async copyAnswer(result: RlmResult) {
+    await navigator.clipboard.writeText(this.formatAnswerExport(result));
+    new Notice("RLM answer copied.");
+  }
+
+  async insertAnswerIntoActiveNote(result: RlmResult) {
+    const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const editor = markdownView?.editor;
+
+    if (!editor) {
+      throw new Error("Open a Markdown note before inserting an RLM answer.");
+    }
+
+    const prefix = editor.getValue().endsWith("\n") ? "\n" : "\n\n";
+    editor.replaceSelection(`${prefix}${this.formatAnswerInsert(result)}\n`);
+    new Notice("RLM answer inserted into the active note.");
+  }
+
   getLastResult() {
     return this.lastResult;
   }
@@ -425,6 +444,34 @@ export default class RlmPlugin extends Plugin {
       result.budgetStatus,
       "",
     ].join("\n");
+  }
+
+  private formatAnswerExport(result: RlmResult) {
+    return [
+      result.answer,
+      "",
+      "Sources:",
+      ...this.formatSourceLinks(result.sources),
+    ].join("\n");
+  }
+
+  private formatAnswerInsert(result: RlmResult) {
+    return [
+      "## RLM Answer",
+      "",
+      result.answer,
+      "",
+      "### Sources",
+      ...this.formatSourceLinks(result.sources),
+    ].join("\n");
+  }
+
+  private formatSourceLinks(sources: string[]) {
+    if (sources.length === 0) {
+      return ["- No source notes captured yet."];
+    }
+
+    return sources.map((source) => `- [[${source.replace(/\.md$/, "")}]]`);
   }
 
   private timestamp() {
@@ -798,20 +845,32 @@ class RlmResultView extends ItemView {
     container.createEl("h4", { text: "Budget" });
     container.createDiv({ cls: "rlm-result-meta", text: result.budgetStatus });
 
-    new Setting(container as HTMLElement)
-      .addButton((button) => button
-        .setButtonText("Create answer note")
-        .onClick(async () => {
-          await this.plugin.createAnswerNote(result);
-        }));
+    const actions = container.createDiv({ cls: "rlm-result-actions" });
+
+    const addActionButton = (label: string, onClick: () => Promise<void> | void) => {
+      const button = actions.createEl("button", { text: label });
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          await onClick();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          new Notice(message);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    };
+
+    addActionButton("Copy answer", () => this.plugin.copyAnswer(result));
+    addActionButton("Insert into note", () => this.plugin.insertAnswerIntoActiveNote(result));
+    addActionButton("Create answer note", () => this.plugin.createAnswerNote(result));
 
     if (result.canCancel) {
-      new Setting(container as HTMLElement)
-        .addButton((button) => button
-          .setButtonText("Cancel request")
-          .onClick(() => {
-            this.plugin.cancelActiveRequest();
-          }));
+      const cancelButton = actions.createEl("button", { text: "Cancel request" });
+      cancelButton.addEventListener("click", () => {
+        this.plugin.cancelActiveRequest();
+      });
     }
   }
 }
