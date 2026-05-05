@@ -7,7 +7,10 @@ export interface RlmToolExecutionSettings {
   maxSearchResults: number;
   maxFolderNotesListed: number;
   maxNoteCharacters: number;
+  maxTotalCharacters: number;
+  initialCharactersUsed?: number;
   ignoredFolders: string[];
+  shouldCancel: () => boolean;
 }
 
 export interface RlmToolDefinition {
@@ -35,18 +38,14 @@ interface ToolCall {
 type SummarizeCallback = (text: string, instruction: string, depth: number) => Promise<string>;
 
 export class RlmToolExecutor {
-  private readonly contextReaders: VaultContextReaders;
+  private remainingTotalCharacters: number;
 
   constructor(
     private readonly settings: RlmToolExecutionSettings,
     private readonly summarizeCallback: SummarizeCallback,
   ) {
-    this.contextReaders = new VaultContextReaders(settings.app, {
-      maxNotesRead: settings.maxNotesRead,
-      maxFolderNotesListed: settings.maxFolderNotesListed,
-      maxNoteCharacters: settings.maxNoteCharacters,
-      ignoredFolders: settings.ignoredFolders,
-    });
+    const initialCharactersUsed = settings.initialCharactersUsed ?? 0;
+    this.remainingTotalCharacters = Math.max(0, settings.maxTotalCharacters - initialCharactersUsed);
   }
 
   getDefinitions(): RlmToolDefinition[] {
@@ -146,6 +145,7 @@ export class RlmToolExecutor {
   }
 
   async execute(toolCall: ToolCall, depth: number, maxDepth: number): Promise<RlmToolExecutionResult> {
+    this.throwIfCancelled();
     const args = this.parseArguments(toolCall.function.arguments);
 
     switch (toolCall.function.name) {
@@ -173,8 +173,13 @@ export class RlmToolExecutor {
     }
   }
 
+  shouldCancel() {
+    return this.settings.shouldCancel();
+  }
+
   private async readNote(path: string): Promise<RlmToolExecutionResult> {
-    const result = await this.contextReaders.readCurrentNote(path);
+    const result = await this.createContextReaders().readCurrentNote(path);
+    this.consumeCharacterBudget(result.totalCharacters);
     return {
       output: result.records[0] ?? { path, error: "Note not found." },
       sources: result.records.map((record) => record.path),
@@ -356,6 +361,26 @@ export class RlmToolExecutor {
 
   private titleFromPath(path: string) {
     return path.split("/").pop()?.replace(/\.md$/, "") ?? path;
+  }
+
+  private createContextReaders() {
+    return new VaultContextReaders(this.settings.app, {
+      maxNotesRead: this.settings.maxNotesRead,
+      maxFolderNotesListed: this.settings.maxFolderNotesListed,
+      maxNoteCharacters: this.settings.maxNoteCharacters,
+      maxTotalCharacters: this.remainingTotalCharacters,
+      ignoredFolders: this.settings.ignoredFolders,
+    });
+  }
+
+  private consumeCharacterBudget(consumed: number) {
+    this.remainingTotalCharacters = Math.max(0, this.remainingTotalCharacters - consumed);
+  }
+
+  private throwIfCancelled() {
+    if (this.settings.shouldCancel()) {
+      throw new Error("Request cancelled.");
+    }
   }
 }
 
