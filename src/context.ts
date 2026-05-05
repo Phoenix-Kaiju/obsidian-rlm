@@ -87,7 +87,7 @@ export class VaultContextReaders {
   private async readFiles(files: TFile[]): Promise<VaultContextResult> {
     const records: VaultContextRecord[] = [];
     const skipped: string[] = [];
-    let limitHit = files.length > this.limits.maxNotesRead;
+    const limitHit = files.length > this.limits.maxNotesRead;
 
     for (const file of files) {
       if (records.length >= this.limits.maxNotesRead) {
