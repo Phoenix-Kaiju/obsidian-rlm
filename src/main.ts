@@ -22,6 +22,7 @@ const DEFAULT_SETTINGS: RlmSettings = {
   maxSearchResults: 20,
   maxFolderNotesListed: 100,
   maxNoteCharacters: 12000,
+  maxTotalCharacters: 40000,
   maxToolDepth: 2,
   maxElapsedSeconds: 60,
   ignoredFolders: ".obsidian,RLM Answers",
@@ -39,6 +40,7 @@ export interface RlmSettings {
   maxSearchResults: number;
   maxFolderNotesListed: number;
   maxNoteCharacters: number;
+  maxTotalCharacters: number;
   maxToolDepth: number;
   maxElapsedSeconds: number;
   ignoredFolders: string;
@@ -59,11 +61,14 @@ interface RlmResult {
   sources: string[];
   budgetStatus: string;
   status?: "loading" | "complete" | "error";
+  canCancel?: boolean;
 }
 
 export default class RlmPlugin extends Plugin {
   settings: RlmSettings;
   private lastResult: RlmResult | null = null;
+  private activeRequestId: number | null = null;
+  private nextRequestId = 1;
 
   async onload() {
     await this.loadSettings();
@@ -154,6 +159,10 @@ export default class RlmPlugin extends Plugin {
       return;
     }
 
+    const requestId = this.nextRequestId;
+    this.nextRequestId += 1;
+    this.activeRequestId = requestId;
+
     await this.activateResultView();
 
     const context = await this.collectContext(request);
@@ -164,6 +173,7 @@ export default class RlmPlugin extends Plugin {
       sources: context.records.map((record) => record.path),
       budgetStatus: this.formatBudgetStatus(),
       status: "loading",
+      canCancel: true,
     };
     this.refreshResultViews();
 
@@ -174,7 +184,10 @@ export default class RlmPlugin extends Plugin {
         maxSearchResults: this.settings.maxSearchResults,
         maxFolderNotesListed: this.settings.maxFolderNotesListed,
         maxNoteCharacters: this.settings.maxNoteCharacters,
+        maxTotalCharacters: this.settings.maxTotalCharacters,
+        initialCharactersUsed: context.totalCharacters,
         ignoredFolders: this.parseIgnoredFolders(),
+        shouldCancel: () => this.activeRequestId !== requestId,
       });
 
       const response = await toolLoop.run({
@@ -184,15 +197,24 @@ export default class RlmPlugin extends Plugin {
         settings: this.settings,
       });
 
+      if (this.activeRequestId !== requestId) {
+        return;
+      }
+
       this.lastResult = {
         question: request.question,
         scope: request.scope,
         answer: response.answer,
         sources: response.sources,
-        budgetStatus: this.formatBudgetStatus(response.toolCallsUsed, response.depth),
+        budgetStatus: this.formatBudgetStatus(response.toolCallsUsed, response.depth, context.totalCharacters),
         status: "complete",
+        canCancel: false,
       };
     } catch (error) {
+      if (this.activeRequestId !== requestId) {
+        return;
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       this.lastResult = {
         question: request.question,
@@ -205,12 +227,34 @@ export default class RlmPlugin extends Plugin {
           this.formatContextSummary(context),
         ].join("\n"),
         sources: context.records.map((record) => record.path),
-        budgetStatus: this.formatBudgetStatus(),
+        budgetStatus: this.formatBudgetStatus(undefined, undefined, context.totalCharacters),
         status: "error",
+        canCancel: false,
       };
+    } finally {
+      if (this.activeRequestId === requestId) {
+        this.activeRequestId = null;
+      }
     }
 
     this.refreshResultViews();
+  }
+
+  cancelActiveRequest() {
+    if (this.activeRequestId === null) {
+      return;
+    }
+
+    this.activeRequestId = null;
+    if (this.lastResult) {
+      this.lastResult = {
+        ...this.lastResult,
+        answer: "RLM request cancelled.",
+        status: "error",
+        canCancel: false,
+      };
+      this.refreshResultViews();
+    }
   }
 
   async createAnswerNote(result: RlmResult) {
@@ -263,6 +307,7 @@ export default class RlmPlugin extends Plugin {
       maxNotesRead: this.settings.maxNotesRead,
       maxFolderNotesListed: this.settings.maxFolderNotesListed,
       maxNoteCharacters: this.settings.maxNoteCharacters,
+      maxTotalCharacters: this.settings.maxTotalCharacters,
       ignoredFolders: this.parseIgnoredFolders(),
     });
 
@@ -286,6 +331,7 @@ export default class RlmPlugin extends Plugin {
       records: [],
       skipped: [`No context reader matched scope: ${request.scope}`],
       limitHit: false,
+      totalCharacters: 0,
     };
   }
 
@@ -319,14 +365,16 @@ export default class RlmPlugin extends Plugin {
     return lines.join("\n");
   }
 
-  private formatBudgetStatus(toolCallsUsed?: number, depth?: number) {
+  private formatBudgetStatus(toolCallsUsed?: number, depth?: number, totalCharacters?: number) {
     return [
       `max tool calls: ${this.settings.maxToolCalls}`,
       `max depth: ${this.settings.maxToolDepth}`,
       `max notes read: ${this.settings.maxNotesRead}`,
       `max search results: ${this.settings.maxSearchResults}`,
       `max note chars: ${this.settings.maxNoteCharacters}`,
+      `max total chars: ${this.settings.maxTotalCharacters}`,
       `max elapsed: ${this.settings.maxElapsedSeconds}s`,
+      typeof totalCharacters === "number" ? `chars collected: ${totalCharacters}` : "",
       typeof toolCallsUsed === "number" ? `tool calls used: ${toolCallsUsed}` : "",
       typeof depth === "number" ? `depth reached: ${depth}` : "",
     ].filter((value) => value.length > 0).join(", ");
@@ -510,6 +558,15 @@ class RlmResultView extends ItemView {
         .onClick(async () => {
           await this.plugin.createAnswerNote(result);
         }));
+
+    if (result.canCancel) {
+      new Setting(container as HTMLElement)
+        .addButton((button) => button
+          .setButtonText("Cancel request")
+          .onClick(() => {
+            this.plugin.cancelActiveRequest();
+          }));
+    }
   }
 }
 
@@ -571,6 +628,7 @@ class RlmSettingTab extends PluginSettingTab {
     this.addNumberSetting("Max search results", "maxSearchResults");
     this.addNumberSetting("Max folder notes listed", "maxFolderNotesListed");
     this.addNumberSetting("Max note characters", "maxNoteCharacters");
+    this.addNumberSetting("Max total characters", "maxTotalCharacters");
     this.addNumberSetting("Max tool depth", "maxToolDepth");
     this.addNumberSetting("Max elapsed seconds", "maxElapsedSeconds");
 
@@ -591,6 +649,7 @@ class RlmSettingTab extends PluginSettingTab {
     "maxSearchResults" |
     "maxFolderNotesListed" |
     "maxNoteCharacters" |
+    "maxTotalCharacters" |
     "maxToolDepth" |
     "maxElapsedSeconds"
   >) {

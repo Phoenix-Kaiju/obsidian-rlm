@@ -62,6 +62,7 @@ export class RlmToolLoop {
     if (depth > params.settings.maxToolDepth) {
       throw new Error(`Maximum tool depth (${params.settings.maxToolDepth}) exceeded.`);
     }
+    const deadline = Date.now() + params.settings.maxElapsedSeconds * 1000;
 
     if (!params.settings.model.trim()) {
       throw new Error("Set an LM Studio model in RLM settings before asking a question.");
@@ -82,7 +83,11 @@ export class RlmToolLoop {
     let toolCallsUsed = 0;
 
     for (let iteration = 0; iteration < params.settings.maxToolCalls; iteration += 1) {
+      this.throwIfCancelled();
+      this.throwIfExpired(deadline);
       const assistantMessage = await this.createChatCompletion(messages, true);
+      this.throwIfCancelled();
+      this.throwIfExpired(deadline);
       const validatedToolCalls = this.validateToolCalls(assistantMessage.tool_calls);
 
       if (validatedToolCalls.length === 0) {
@@ -110,6 +115,8 @@ export class RlmToolLoop {
       });
 
       for (const toolCall of validatedToolCalls) {
+        this.throwIfCancelled();
+        this.throwIfExpired(deadline);
         const result = await this.toolExecutor.execute(toolCall, depth, params.settings.maxToolDepth);
         toolCallsUsed += 1;
         for (const source of result.sources) {
@@ -266,5 +273,17 @@ export class RlmToolLoop {
     }
 
     return content.slice(0, 800);
+  }
+
+  private throwIfCancelled() {
+    if (this.toolExecutor.shouldCancel()) {
+      throw new Error("Request cancelled.");
+    }
+  }
+
+  private throwIfExpired(deadline: number) {
+    if (Date.now() > deadline) {
+      throw new Error(`Maximum elapsed time (${this.settings.maxElapsedSeconds}s) exceeded.`);
+    }
   }
 }
