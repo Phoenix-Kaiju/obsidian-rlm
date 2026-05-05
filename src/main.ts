@@ -9,6 +9,7 @@ import {
   WorkspaceLeaf,
 } from "obsidian";
 import { VaultContextReaders, VaultContextResult } from "./context";
+import { RlmToolLoop } from "./llm";
 
 const VIEW_TYPE_RLM_RESULTS = "rlm-results";
 const DEFAULT_SETTINGS: RlmSettings = {
@@ -21,13 +22,14 @@ const DEFAULT_SETTINGS: RlmSettings = {
   maxSearchResults: 20,
   maxFolderNotesListed: 100,
   maxNoteCharacters: 12000,
+  maxToolDepth: 2,
   maxElapsedSeconds: 60,
   ignoredFolders: ".obsidian,RLM Answers",
 };
 
-type RlmScope = "current-note" | "selection" | "folder" | "vault";
+export type RlmScope = "current-note" | "selection" | "folder" | "vault";
 
-interface RlmSettings {
+export interface RlmSettings {
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -37,6 +39,7 @@ interface RlmSettings {
   maxSearchResults: number;
   maxFolderNotesListed: number;
   maxNoteCharacters: number;
+  maxToolDepth: number;
   maxElapsedSeconds: number;
   ignoredFolders: string;
 }
@@ -55,6 +58,7 @@ interface RlmResult {
   answer: string;
   sources: string[];
   budgetStatus: string;
+  status?: "loading" | "complete" | "error";
 }
 
 export default class RlmPlugin extends Plugin {
@@ -153,22 +157,59 @@ export default class RlmPlugin extends Plugin {
     await this.activateResultView();
 
     const context = await this.collectContext(request);
-
-    const result: RlmResult = {
+    this.lastResult = {
       question: request.question,
       scope: request.scope,
-      answer: [
-        "Vault context readers are ready.",
-        "",
-        this.formatContextSummary(context),
-        "",
-        "The next implementation slice is the LM Studio tool-calling loop.",
-      ].join("\n"),
+      answer: "Running RLM tool loop...",
       sources: context.records.map((record) => record.path),
       budgetStatus: this.formatBudgetStatus(),
+      status: "loading",
     };
+    this.refreshResultViews();
 
-    this.lastResult = result;
+    try {
+      const toolLoop = new RlmToolLoop(this.settings, {
+        app: this.app,
+        maxNotesRead: this.settings.maxNotesRead,
+        maxSearchResults: this.settings.maxSearchResults,
+        maxFolderNotesListed: this.settings.maxFolderNotesListed,
+        maxNoteCharacters: this.settings.maxNoteCharacters,
+        ignoredFolders: this.parseIgnoredFolders(),
+      });
+
+      const response = await toolLoop.run({
+        question: request.question,
+        scope: request.scope,
+        context,
+        settings: this.settings,
+      });
+
+      this.lastResult = {
+        question: request.question,
+        scope: request.scope,
+        answer: response.answer,
+        sources: response.sources,
+        budgetStatus: this.formatBudgetStatus(response.toolCallsUsed, response.depth),
+        status: "complete",
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.lastResult = {
+        question: request.question,
+        scope: request.scope,
+        answer: [
+          "RLM request failed.",
+          "",
+          message,
+          "",
+          this.formatContextSummary(context),
+        ].join("\n"),
+        sources: context.records.map((record) => record.path),
+        budgetStatus: this.formatBudgetStatus(),
+        status: "error",
+      };
+    }
+
     this.refreshResultViews();
   }
 
@@ -278,14 +319,17 @@ export default class RlmPlugin extends Plugin {
     return lines.join("\n");
   }
 
-  private formatBudgetStatus() {
+  private formatBudgetStatus(toolCallsUsed?: number, depth?: number) {
     return [
       `max tool calls: ${this.settings.maxToolCalls}`,
+      `max depth: ${this.settings.maxToolDepth}`,
       `max notes read: ${this.settings.maxNotesRead}`,
       `max search results: ${this.settings.maxSearchResults}`,
       `max note chars: ${this.settings.maxNoteCharacters}`,
       `max elapsed: ${this.settings.maxElapsedSeconds}s`,
-    ].join(", ");
+      typeof toolCallsUsed === "number" ? `tool calls used: ${toolCallsUsed}` : "",
+      typeof depth === "number" ? `depth reached: ${depth}` : "",
+    ].filter((value) => value.length > 0).join(", ");
   }
 
   private parseIgnoredFolders() {
@@ -527,6 +571,7 @@ class RlmSettingTab extends PluginSettingTab {
     this.addNumberSetting("Max search results", "maxSearchResults");
     this.addNumberSetting("Max folder notes listed", "maxFolderNotesListed");
     this.addNumberSetting("Max note characters", "maxNoteCharacters");
+    this.addNumberSetting("Max tool depth", "maxToolDepth");
     this.addNumberSetting("Max elapsed seconds", "maxElapsedSeconds");
 
     new Setting(containerEl)
@@ -546,6 +591,7 @@ class RlmSettingTab extends PluginSettingTab {
     "maxSearchResults" |
     "maxFolderNotesListed" |
     "maxNoteCharacters" |
+    "maxToolDepth" |
     "maxElapsedSeconds"
   >) {
     new Setting(this.containerEl)
