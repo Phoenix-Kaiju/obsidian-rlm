@@ -61,6 +61,7 @@ interface RlmResult {
   answer: string;
   sources: string[];
   budgetStatus: string;
+  insertTargetPath?: string;
   status?: "loading" | "complete" | "error";
   canCancel?: boolean;
 }
@@ -163,6 +164,7 @@ export default class RlmPlugin extends Plugin {
     const requestId = this.nextRequestId;
     this.nextRequestId += 1;
     this.activeRequestId = requestId;
+    const insertTargetPath = this.getInsertTargetPath(request);
 
     await this.activateResultView();
 
@@ -173,6 +175,7 @@ export default class RlmPlugin extends Plugin {
       answer: "Running RLM tool loop...",
       sources: context.records.map((record) => record.path),
       budgetStatus: this.formatBudgetStatus(),
+      insertTargetPath,
       status: "loading",
       canCancel: true,
     };
@@ -208,6 +211,7 @@ export default class RlmPlugin extends Plugin {
         answer: response.answer,
         sources: response.sources,
         budgetStatus: this.formatBudgetStatus(response.toolCallsUsed, response.depth, context.totalCharacters),
+        insertTargetPath,
         status: "complete",
         canCancel: false,
       };
@@ -229,6 +233,7 @@ export default class RlmPlugin extends Plugin {
         ].join("\n"),
         sources: context.records.map((record) => record.path),
         budgetStatus: this.formatBudgetStatus(undefined, undefined, context.totalCharacters),
+        insertTargetPath,
         status: "error",
         canCancel: false,
       };
@@ -275,8 +280,7 @@ export default class RlmPlugin extends Plugin {
   }
 
   async insertAnswerIntoActiveNote(result: RlmResult) {
-    const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    const editor = markdownView?.editor;
+    const editor = this.resolveInsertEditor(result);
 
     if (!editor) {
       throw new Error("Open a Markdown note before inserting an RLM answer.");
@@ -444,6 +448,36 @@ export default class RlmPlugin extends Plugin {
       result.budgetStatus,
       "",
     ].join("\n");
+  }
+
+  private getInsertTargetPath(request: RlmRequest) {
+    if (request.scope === "current-note" || request.scope === "selection") {
+      return request.notePath;
+    }
+
+    return this.app.workspace.getActiveViewOfType(MarkdownView)?.file?.path;
+  }
+
+  private resolveInsertEditor(result: RlmResult) {
+    const markdownLeaves = this.app.workspace.getLeavesOfType("markdown");
+
+    if (result.insertTargetPath) {
+      for (const leaf of markdownLeaves) {
+        const view = leaf.view;
+        if (view instanceof MarkdownView && view.file?.path === result.insertTargetPath) {
+          return view.editor;
+        }
+      }
+    }
+
+    for (const leaf of markdownLeaves) {
+      const view = leaf.view;
+      if (view instanceof MarkdownView) {
+        return view.editor;
+      }
+    }
+
+    return null;
   }
 
   private formatAnswerExport(result: RlmResult) {
