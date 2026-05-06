@@ -92,6 +92,7 @@ export default class RlmPlugin extends Plugin {
   private activeRequestId: number | null = null;
   private nextRequestId = 1;
   private logWriteChain: Promise<void> = Promise.resolve();
+  private cancelledRequestIds = new Set<number>();
 
   async onload() {
     await this.loadSettings();
@@ -268,7 +269,7 @@ export default class RlmPlugin extends Plugin {
         maxTotalCharacters: this.settings.maxTotalCharacters,
         initialCharactersUsed: context.totalCharacters,
         ignoredFolders: this.parseIgnoredFolders(),
-        shouldCancel: () => this.activeRequestId !== requestId,
+        shouldCancel: () => this.cancelledRequestIds.has(requestId),
       });
 
       const response = await toolLoop.run({
@@ -278,7 +279,7 @@ export default class RlmPlugin extends Plugin {
         settings: this.settings,
       });
 
-      if (this.activeRequestId !== requestId) {
+      if (this.activeRequestId !== requestId || this.cancelledRequestIds.has(requestId)) {
         return;
       }
 
@@ -294,7 +295,7 @@ export default class RlmPlugin extends Plugin {
       this.upsertResult(completedResult);
       this.enqueueLogEntry(completedResult);
     } catch (error) {
-      if (this.activeRequestId !== requestId) {
+      if (this.activeRequestId !== requestId || this.cancelledRequestIds.has(requestId)) {
         return;
       }
 
@@ -317,6 +318,7 @@ export default class RlmPlugin extends Plugin {
       this.upsertResult(failedResult);
       this.enqueueLogEntry(failedResult);
     } finally {
+      this.cancelledRequestIds.delete(requestId);
       if (this.activeRequestId === requestId) {
         this.activeRequestId = null;
       }
@@ -330,10 +332,9 @@ export default class RlmPlugin extends Plugin {
       return;
     }
 
+    this.cancelledRequestIds.add(this.activeRequestId);
     this.markActiveRequestCancelled("RLM request cancelled.");
-    this.activeRequestId = null;
     this.refreshResultViews();
-    void this.processQueue();
   }
 
   cancelQueuedRequest(resultId: number) {
