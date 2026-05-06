@@ -91,6 +91,7 @@ export default class RlmPlugin extends Plugin {
   private requestQueue: QueuedRequest[] = [];
   private activeRequestId: number | null = null;
   private nextRequestId = 1;
+  private logWriteChain: Promise<void> = Promise.resolve();
 
   async onload() {
     await this.loadSettings();
@@ -207,7 +208,7 @@ export default class RlmPlugin extends Plugin {
     };
     this.requestQueue.push(queuedRequest);
     this.upsertResult(queuedResult);
-    await this.appendLogEntry(queuedResult);
+    this.enqueueLogEntry(queuedResult);
     this.refreshResultViews();
     void this.processQueue();
   }
@@ -245,7 +246,7 @@ export default class RlmPlugin extends Plugin {
       canCancel: true,
     };
     this.upsertResult(loadingResult);
-    await this.appendLogEntry(loadingResult);
+    this.enqueueLogEntry(loadingResult);
     this.refreshResultViews();
 
     const context = await this.collectContext(request);
@@ -291,7 +292,7 @@ export default class RlmPlugin extends Plugin {
         status: "complete",
       };
       this.upsertResult(completedResult);
-      await this.appendLogEntry(completedResult);
+      this.enqueueLogEntry(completedResult);
     } catch (error) {
       if (this.activeRequestId !== requestId) {
         return;
@@ -314,7 +315,7 @@ export default class RlmPlugin extends Plugin {
         status: "error",
       };
       this.upsertResult(failedResult);
-      await this.appendLogEntry(failedResult);
+      this.enqueueLogEntry(failedResult);
     } finally {
       if (this.activeRequestId === requestId) {
         this.activeRequestId = null;
@@ -355,7 +356,7 @@ export default class RlmPlugin extends Plugin {
       status: "cancelled",
     };
     this.upsertResult(cancelledResult);
-    void this.appendLogEntry(cancelledResult);
+    this.enqueueLogEntry(cancelledResult);
     this.refreshResultViews();
   }
 
@@ -595,7 +596,18 @@ export default class RlmPlugin extends Plugin {
       canCancel: false,
     };
     this.upsertResult(cancelledResult);
-    void this.appendLogEntry(cancelledResult);
+    this.enqueueLogEntry(cancelledResult);
+  }
+
+  private enqueueLogEntry(result: RlmResult) {
+    this.logWriteChain = this.logWriteChain
+      .catch(() => undefined)
+      .then(() => this.appendLogEntry(result))
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("RLM log write failed:", message);
+        new Notice(`RLM log write failed: ${message}`);
+      });
   }
 
   private async appendLogEntry(result: RlmResult) {
@@ -638,6 +650,7 @@ export default class RlmPlugin extends Plugin {
 
   private escapeMarkdownTableCell(value: string) {
     return value
+      .replace(/\\/g, "\\\\")
       .replace(/\r?\n/g, "<br>")
       .replace(/\|/g, "\\|")
       .trim();
