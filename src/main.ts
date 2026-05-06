@@ -7,6 +7,7 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
+  TFile,
   WorkspaceLeaf,
 } from "obsidian";
 import { VaultContextReaders, VaultContextResult } from "./context";
@@ -56,19 +57,38 @@ interface RlmRequest {
 }
 
 interface RlmResult {
+  id: number;
   question: string;
   scope: RlmScope;
   answer: string;
   sources: string[];
   budgetStatus: string;
+  queuedAt: string;
+  startedAt?: string;
+  startedAtMs?: number;
+  durationMs?: number;
+  answerNotePath?: string;
   insertTargetPath?: string;
-  status?: "loading" | "complete" | "error";
+  status: "queued" | "loading" | "complete" | "error" | "cancelled";
   canCancel?: boolean;
+}
+
+interface QueuedRequest {
+  id: number;
+  request: RlmRequest;
+  insertTargetPath?: string;
+  queuedAt: string;
+}
+
+interface RlmViewResult extends RlmResult {
+  queuePosition: number;
 }
 
 export default class RlmPlugin extends Plugin {
   settings: RlmSettings;
-  private lastResult: RlmResult | null = null;
+  private readonly maxResultHistory = 20;
+  private resultHistory: RlmResult[] = [];
+  private requestQueue: QueuedRequest[] = [];
   private activeRequestId: number | null = null;
   private nextRequestId = 1;
 
@@ -163,22 +183,78 @@ export default class RlmPlugin extends Plugin {
 
     const requestId = this.nextRequestId;
     this.nextRequestId += 1;
-    this.activeRequestId = requestId;
-    const insertTargetPath = this.getInsertTargetPath(request);
+    const queuedAt = this.timestamp();
+    const queuedRequest: QueuedRequest = {
+      id: requestId,
+      request,
+      insertTargetPath: this.getInsertTargetPath(request),
+      queuedAt,
+    };
 
     await this.activateResultView();
 
-    const context = await this.collectContext(request);
-    this.lastResult = {
+    const queuedResult: RlmResult = {
+      id: requestId,
+      question: request.question,
+      scope: request.scope,
+      answer: "Queued for processing.",
+      sources: [],
+      budgetStatus: this.formatBudgetStatus(),
+      queuedAt,
+      insertTargetPath: queuedRequest.insertTargetPath,
+      status: "queued",
+      canCancel: false,
+    };
+    this.requestQueue.push(queuedRequest);
+    this.upsertResult(queuedResult);
+    await this.appendLogEntry(queuedResult);
+    this.refreshResultViews();
+    void this.processQueue();
+  }
+
+  private async processQueue() {
+    if (this.activeRequestId !== null) {
+      return;
+    }
+
+    const nextRequest = this.requestQueue.shift();
+    if (!nextRequest) {
+      return;
+    }
+
+    this.activeRequestId = nextRequest.id;
+    await this.executeQueuedRequest(nextRequest);
+  }
+
+  private async executeQueuedRequest(queuedRequest: QueuedRequest) {
+    const { id: requestId, request, insertTargetPath, queuedAt } = queuedRequest;
+    const startedAt = this.timestamp();
+    const startedAtMs = Date.now();
+    const loadingResult: RlmResult = {
+      id: requestId,
       question: request.question,
       scope: request.scope,
       answer: "Running RLM tool loop...",
-      sources: context.records.map((record) => record.path),
+      sources: [],
       budgetStatus: this.formatBudgetStatus(),
+      queuedAt,
+      startedAt,
+      startedAtMs,
       insertTargetPath,
       status: "loading",
       canCancel: true,
     };
+    this.upsertResult(loadingResult);
+    await this.appendLogEntry(loadingResult);
+    this.refreshResultViews();
+
+    const context = await this.collectContext(request);
+    const runningResult: RlmResult = {
+      ...loadingResult,
+      sources: context.records.map((record) => record.path),
+      budgetStatus: this.formatBudgetStatus(undefined, undefined, context.totalCharacters),
+    };
+    this.upsertResult(runningResult);
     this.refreshResultViews();
 
     try {
@@ -205,25 +281,25 @@ export default class RlmPlugin extends Plugin {
         return;
       }
 
-      this.lastResult = {
-        question: request.question,
-        scope: request.scope,
+      const completedResult: RlmResult = {
+        ...runningResult,
         answer: response.answer,
         sources: response.sources,
         budgetStatus: this.formatBudgetStatus(response.toolCallsUsed, response.depth, context.totalCharacters),
-        insertTargetPath,
-        status: "complete",
+        durationMs: Date.now() - startedAtMs,
         canCancel: false,
+        status: "complete",
       };
+      this.upsertResult(completedResult);
+      await this.appendLogEntry(completedResult);
     } catch (error) {
       if (this.activeRequestId !== requestId) {
         return;
       }
 
       const message = error instanceof Error ? error.message : String(error);
-      this.lastResult = {
-        question: request.question,
-        scope: request.scope,
+      const failedResult: RlmResult = {
+        ...runningResult,
         answer: [
           "RLM request failed.",
           "",
@@ -233,17 +309,19 @@ export default class RlmPlugin extends Plugin {
         ].join("\n"),
         sources: context.records.map((record) => record.path),
         budgetStatus: this.formatBudgetStatus(undefined, undefined, context.totalCharacters),
-        insertTargetPath,
-        status: "error",
+        durationMs: Date.now() - startedAtMs,
         canCancel: false,
+        status: "error",
       };
+      this.upsertResult(failedResult);
+      await this.appendLogEntry(failedResult);
     } finally {
       if (this.activeRequestId === requestId) {
         this.activeRequestId = null;
       }
+      this.refreshResultViews();
+      void this.processQueue();
     }
-
-    this.refreshResultViews();
   }
 
   cancelActiveRequest() {
@@ -251,16 +329,34 @@ export default class RlmPlugin extends Plugin {
       return;
     }
 
+    this.markActiveRequestCancelled("RLM request cancelled.");
     this.activeRequestId = null;
-    if (this.lastResult) {
-      this.lastResult = {
-        ...this.lastResult,
-        answer: "RLM request cancelled.",
-        status: "error",
-        canCancel: false,
-      };
-      this.refreshResultViews();
+    this.refreshResultViews();
+    void this.processQueue();
+  }
+
+  cancelQueuedRequest(resultId: number) {
+    const nextQueue = this.requestQueue.filter((entry) => entry.id !== resultId);
+    if (nextQueue.length === this.requestQueue.length) {
+      return;
     }
+
+    this.requestQueue = nextQueue;
+    const result = this.resultHistory.find((entry) => entry.id === resultId);
+    if (!result) {
+      return;
+    }
+
+    const cancelledResult: RlmResult = {
+      ...result,
+      answer: "Removed from queue.",
+      durationMs: undefined,
+      canCancel: false,
+      status: "cancelled",
+    };
+    this.upsertResult(cancelledResult);
+    void this.appendLogEntry(cancelledResult);
+    this.refreshResultViews();
   }
 
   async createAnswerNote(result: RlmResult) {
@@ -270,6 +366,12 @@ export default class RlmPlugin extends Plugin {
     const path = `${this.settings.answerFolder}/${fileName}`;
     const content = this.formatAnswerNote(result);
     const file = await this.app.vault.create(path, content);
+    const updatedResult = {
+      ...result,
+      answerNotePath: file.path,
+    };
+    this.upsertResult(updatedResult);
+    this.refreshResultViews();
 
     await this.app.workspace.getLeaf(false).openFile(file);
   }
@@ -291,8 +393,37 @@ export default class RlmPlugin extends Plugin {
     new Notice("RLM answer inserted into the active note.");
   }
 
-  getLastResult() {
-    return this.lastResult;
+  getResults(): RlmViewResult[] {
+    return this.resultHistory.map((result) => ({
+      ...result,
+      queuePosition: result.status === "queued"
+        ? this.requestQueue.findIndex((entry) => entry.id === result.id) + 1
+        : 0,
+    }));
+  }
+
+  dismissResult(resultId: number) {
+    const nextHistory = this.resultHistory.filter((result) => result.id !== resultId);
+    if (nextHistory.length === this.resultHistory.length) {
+      return;
+    }
+
+    this.resultHistory = nextHistory;
+    this.refreshResultViews();
+  }
+
+  clearResults() {
+    const nextHistory = this.resultHistory.filter((result) => !this.isTerminalStatus(result.status));
+    if (nextHistory.length === this.resultHistory.length) {
+      return;
+    }
+
+    this.resultHistory = nextHistory;
+    this.refreshResultViews();
+  }
+
+  formatResultDuration(durationMs?: number) {
+    return this.formatDuration(durationMs);
   }
 
   private async activateResultView() {
@@ -421,6 +552,111 @@ export default class RlmPlugin extends Plugin {
     if (!existing) {
       await this.app.vault.createFolder(normalized);
     }
+  }
+
+  private upsertResult(result: RlmResult) {
+    const existingIndex = this.resultHistory.findIndex((entry) => entry.id === result.id);
+    if (existingIndex >= 0) {
+      this.resultHistory[existingIndex] = result;
+    } else {
+      this.resultHistory.unshift(result);
+    }
+
+    while (this.resultHistory.length > this.maxResultHistory) {
+      const removableIndex = this.resultHistory
+        .map((entry, index) => ({ entry, index }))
+        .reverse()
+        .find(({ entry }) => this.isTerminalStatus(entry.status))
+        ?.index;
+      if (removableIndex === undefined) {
+        break;
+      }
+      this.resultHistory.splice(removableIndex, 1);
+    }
+  }
+
+  private markActiveRequestCancelled(message: string) {
+    if (this.activeRequestId === null) {
+      return;
+    }
+
+    const activeResult = this.resultHistory.find((result) => result.id === this.activeRequestId);
+    if (!activeResult) {
+      return;
+    }
+
+    const cancelledResult = {
+      ...activeResult,
+      answer: message,
+      durationMs: typeof activeResult.startedAtMs === "number"
+        ? Date.now() - activeResult.startedAtMs
+        : undefined,
+      status: "cancelled" as const,
+      canCancel: false,
+    };
+    this.upsertResult(cancelledResult);
+    void this.appendLogEntry(cancelledResult);
+  }
+
+  private async appendLogEntry(result: RlmResult) {
+    await this.ensureFolder(this.settings.answerFolder);
+    const logPath = `${this.settings.answerFolder}/RLM Log.md`;
+    const existing = this.app.vault.getAbstractFileByPath(logPath);
+    const eventTimestamp = this.timestamp();
+    const noteLink = result.answerNotePath
+      ? `[[${result.answerNotePath.replace(/\.md$/, "")}]]`
+      : "";
+    const startedAt = result.startedAt ?? "";
+    const duration = this.formatDuration(result.durationMs);
+    const escapedQuestion = this.escapeMarkdownTableCell(result.question);
+    const escapedStatus = this.escapeMarkdownTableCell(result.status);
+    const escapedScope = this.escapeMarkdownTableCell(result.scope);
+    const escapedNoteLink = this.escapeMarkdownTableCell(noteLink);
+    const escapedStartedAt = this.escapeMarkdownTableCell(startedAt);
+    const escapedDuration = this.escapeMarkdownTableCell(duration);
+    const row = `| ${eventTimestamp} | ${result.id} | ${escapedStatus} | ${escapedScope} | ${escapedQuestion} | ${escapedStartedAt} | ${escapedDuration} | ${escapedNoteLink} |`;
+    const header = [
+      "# RLM Log",
+      "",
+      "| Timestamp | Request ID | Status | Scope | Question | Started At | Duration | Answer Note |",
+      "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ].join("\n");
+
+    if (!existing) {
+      await this.app.vault.create(logPath, `${header}\n${row}\n`);
+      return;
+    }
+
+    if (!(existing instanceof TFile)) {
+      throw new Error(`RLM log path is not a file: ${logPath}`);
+    }
+
+    const current = await this.app.vault.read(existing);
+    const suffix = current.endsWith("\n") ? "" : "\n";
+    await this.app.vault.modify(existing, `${current}${suffix}${row}\n`);
+  }
+
+  private escapeMarkdownTableCell(value: string) {
+    return value
+      .replace(/\r?\n/g, "<br>")
+      .replace(/\|/g, "\\|")
+      .trim();
+  }
+
+  private formatDuration(durationMs?: number) {
+    if (typeof durationMs !== "number" || durationMs < 0) {
+      return "";
+    }
+
+    if (durationMs < 1000) {
+      return `${durationMs}ms`;
+    }
+
+    return `${(durationMs / 1000).toFixed(1)}s`;
+  }
+
+  private isTerminalStatus(status: RlmResult["status"]) {
+    return status === "complete" || status === "error" || status === "cancelled";
   }
 
   private formatAnswerNote(result: RlmResult) {
@@ -866,12 +1102,21 @@ class RlmResultView extends ItemView {
     container.empty();
     container.addClass("rlm-result-view");
 
-    const result = this.plugin.getLastResult();
+    const results = this.plugin.getResults();
 
     const header = container.createDiv({ cls: "rlm-result-header" });
     header.createDiv({ cls: "rlm-result-title", text: "RLM" });
+    if (results.length > 0) {
+      const clearButton = header.createEl("button", {
+        cls: "rlm-clear-results-button",
+        text: "Clear finished",
+      });
+      clearButton.addEventListener("click", () => {
+        this.plugin.clearResults();
+      });
+    }
 
-    if (!result) {
+    if (results.length === 0) {
       container.createDiv({
         cls: "rlm-empty-state",
         text: "Run an RLM command to ask about a note, selection, folder, or vault.",
@@ -879,51 +1124,93 @@ class RlmResultView extends ItemView {
       return;
     }
 
-    header.createDiv({ cls: "rlm-result-meta", text: result.scope });
-
-    container.createEl("h3", { text: result.question });
-    container.createDiv({ cls: "rlm-result-answer", text: result.answer });
-
-    container.createEl("h4", { text: "Sources" });
-    const sourceList = container.createEl("ul", { cls: "rlm-source-list" });
-    if (result.sources.length === 0) {
-      sourceList.createEl("li", { text: "No source notes captured yet." });
-    } else {
-      for (const source of result.sources) {
-        const item = sourceList.createEl("li");
-        item.createEl("a", { text: source, href: source });
+    const list = container.createDiv({ cls: "rlm-result-list" });
+    for (const result of results) {
+      const card = list.createDiv({ cls: `rlm-result-card rlm-result-status-${result.status}` });
+      const cardHeader = card.createDiv({ cls: "rlm-result-card-header" });
+      const titleGroup = cardHeader.createDiv({ cls: "rlm-result-card-heading" });
+      titleGroup.createEl("h3", { text: result.question });
+      const metaParts = [result.scope, result.status, `queued ${result.queuedAt}`];
+      if (result.startedAt) {
+        metaParts.push(`started ${result.startedAt}`);
       }
-    }
+      if (result.status === "queued" && result.queuePosition > 0) {
+        metaParts.push(`queue #${result.queuePosition}`);
+      }
+      if (result.durationMs !== undefined) {
+        metaParts.push(`duration ${this.plugin.formatResultDuration(result.durationMs)}`);
+      }
+      titleGroup.createDiv({
+        cls: "rlm-result-meta",
+        text: metaParts.join(" | "),
+      });
 
-    container.createEl("h4", { text: "Budget" });
-    container.createDiv({ cls: "rlm-result-meta", text: result.budgetStatus });
+      if (result.status === "queued") {
+        const queueButton = cardHeader.createEl("button", {
+          cls: "rlm-dismiss-result-button",
+          text: "Remove",
+        });
+        queueButton.addEventListener("click", () => {
+          this.plugin.cancelQueuedRequest(result.id);
+        });
+      } else if (result.status !== "loading") {
+        const dismissButton = cardHeader.createEl("button", {
+          cls: "rlm-dismiss-result-button",
+          text: "Close",
+        });
+        dismissButton.addEventListener("click", () => {
+          this.plugin.dismissResult(result.id);
+        });
+      }
 
-    const actions = container.createDiv({ cls: "rlm-result-actions" });
+      card.createDiv({ cls: "rlm-result-answer", text: result.answer });
 
-    const addActionButton = (label: string, onClick: () => Promise<void> | void) => {
-      const button = actions.createEl("button", { text: label });
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        try {
-          await onClick();
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          new Notice(message);
-        } finally {
-          button.disabled = false;
+      card.createEl("h4", { text: "Sources" });
+      const sourceList = card.createEl("ul", { cls: "rlm-source-list" });
+      if (result.sources.length === 0) {
+        sourceList.createEl("li", { text: "No source notes captured yet." });
+      } else {
+        for (const source of result.sources) {
+          const item = sourceList.createEl("li");
+          item.createEl("a", { text: source, href: source });
         }
-      });
-    };
+      }
 
-    addActionButton("Copy answer", () => this.plugin.copyAnswer(result));
-    addActionButton("Insert into note", () => this.plugin.insertAnswerIntoActiveNote(result));
-    addActionButton("Create answer note", () => this.plugin.createAnswerNote(result));
+      card.createEl("h4", { text: "Budget" });
+      card.createDiv({ cls: "rlm-result-meta", text: result.budgetStatus });
 
-    if (result.canCancel) {
-      const cancelButton = actions.createEl("button", { text: "Cancel request" });
-      cancelButton.addEventListener("click", () => {
-        this.plugin.cancelActiveRequest();
-      });
+      const actions = card.createDiv({ cls: "rlm-result-actions" });
+
+      const addActionButton = (label: string, onClick: () => Promise<void> | void) => {
+        const button = actions.createEl("button", { text: label });
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            await onClick();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            new Notice(message);
+          } finally {
+            button.disabled = false;
+          }
+        });
+      };
+
+      const isTerminal = result.status === "complete" || result.status === "error" || result.status === "cancelled";
+      if (isTerminal) {
+        addActionButton("Copy answer", () => this.plugin.copyAnswer(result));
+        addActionButton("Insert into note", () => this.plugin.insertAnswerIntoActiveNote(result));
+      }
+      if ((result.status === "complete" || result.status === "error") && !result.answerNotePath) {
+        addActionButton("Create answer note", () => this.plugin.createAnswerNote(result));
+      }
+
+      if (result.canCancel) {
+        const cancelButton = actions.createEl("button", { text: "Cancel request" });
+        cancelButton.addEventListener("click", () => {
+          this.plugin.cancelActiveRequest();
+        });
+      }
     }
   }
 }
