@@ -166,6 +166,8 @@
   flex-direction: column;
   gap: 12px;
   padding: 12px;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .rlm-result-header {
@@ -173,11 +175,62 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  position: sticky;
+  top: 0;
+  background: var(--background-primary);
+  padding-bottom: 4px;
+  z-index: 1;
 }
 
 .rlm-result-title {
   font-size: var(--font-ui-medium);
   font-weight: 600;
+}
+
+.rlm-result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rlm-result-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-secondary);
+}
+
+.rlm-result-status-queued,
+.rlm-result-status-loading {
+  border-color: var(--interactive-accent);
+}
+
+.rlm-result-status-error,
+.rlm-result-status-cancelled {
+  border-color: var(--text-error);
+}
+
+.rlm-result-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rlm-result-card-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rlm-result-card-heading h3 {
+  margin: 0;
+  font-size: var(--font-ui-medium);
+  line-height: 1.3;
 }
 
 .rlm-result-meta {
@@ -198,6 +251,11 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.rlm-clear-results-button,
+.rlm-dismiss-result-button {
+  white-space: nowrap;
 }
 
 .rlm-empty-state {
